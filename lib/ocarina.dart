@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 
 class OcarinaPlayer {
   static const MethodChannel _channel = const MethodChannel('ocarina');
+  static const EventChannel _eventChannel =
+      const EventChannel('ocarina/duration_events');
 
   /// Player id
   int? _id;
@@ -28,14 +30,33 @@ class OcarinaPlayer {
   }
 
   /// Loads your asset or file, no other operation can be performed on this instance before this is called
-  Future<void> load() async {
+  Future<void> load({
+    void Function(int)? onDiscoverDuration = null,
+  }) async {
     try {
+      if (onDiscoverDuration != null) {
+        final durationFuture =
+            _eventChannel.receiveBroadcastStream().firstWhere((event) {
+          if (event is List) {
+            final path = event.first;
+            return path is String && (path == filePath || path == asset);
+          }
+          return false;
+        });
+        durationFuture.then((event) {
+          if (event is List && event.last is int) {
+            onDiscoverDuration.call(event.last as int);
+          }
+        });
+      }
+
       _id = await _channel.invokeMethod('load', {
         'url': asset ?? filePath,
         'package': package,
         'volume': volume,
         'loop': loop,
         'isAsset': asset != null,
+        'getDuration': onDiscoverDuration != null,
       });
     } on PlatformException catch (e) {
       throw e;

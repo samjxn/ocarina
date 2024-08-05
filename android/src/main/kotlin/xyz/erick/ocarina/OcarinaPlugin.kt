@@ -3,22 +3,24 @@ package xyz.erick.ocarina
 import android.content.Context
 import android.net.Uri
 import android.os.storage.StorageVolume
-import androidx.annotation.NonNull;
+// Unresolved reference: NonNull
+import androidx.annotation.NonNull
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.SimpleExoPlayer
 import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory
 import com.google.android.exoplayer2.source.*
 import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory
+import com.google.android.exoplayer2.util.Util
 import com.google.android.exoplayer2.util.Util.getUserAgent
-
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.EventChannel.EventSink
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry.Registrar
-import java.lang.RuntimeException
 
 abstract class OcarinaPlayer {
   protected var volume: Double;
@@ -77,7 +79,7 @@ abstract class OcarinaPlayer {
     player.playWhenReady = true;
   }
 
-  fun load() {
+  fun load(onDiscoverDuration: ((Long) -> Unit)? = null) {
     // trying to track https://github.com/erickzanardo/ocarina/issues/4
     if (context == null) {
       throw RuntimeException("Context is null");
@@ -89,6 +91,18 @@ abstract class OcarinaPlayer {
       player.repeatMode = Player.REPEAT_MODE_OFF;
 
     mediaSource = extractMediaSourceFromUri(url);
+
+    lateinit var readyListener: ReadyListener
+
+    if (onDiscoverDuration != null) {
+      fun onReady() {
+        player.removeListener(readyListener)
+        onDiscoverDuration.invoke(player.duration)
+      }
+
+      readyListener = ReadyListener(::onReady)
+      player.addListener(readyListener)
+    }
   }
 
   fun seek(position: Long) {
@@ -164,8 +178,17 @@ class OcarinaListener(private val url: String) : Player.Listener {
   }
 }
 
+class ReadyListener(val onReady: () -> Unit) : Player.Listener {
+  override fun onPlaybackStateChanged(state: Int) {
+    println("SLJ in ReadyListener playbackStateChanged: $state")
+    if (state == Player.STATE_READY) onReady()
+  }
+}
+
 public class OcarinaPlugin: FlutterPlugin, MethodCallHandler {
   private lateinit var channel : MethodChannel
+  private lateinit var eventChannel : EventChannel
+  private var eventSink : EventSink? = null
   private var playerIds = 0;
   private lateinit var flutterAssets: FlutterPlugin.FlutterAssets;
   private lateinit var context: Context;
@@ -173,6 +196,23 @@ public class OcarinaPlugin: FlutterPlugin, MethodCallHandler {
   override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     channel = MethodChannel(flutterPluginBinding.getFlutterEngine().getDartExecutor(), "ocarina")
     channel.setMethodCallHandler(this);
+
+    eventChannel = EventChannel(
+      flutterPluginBinding.getFlutterEngine().getDartExecutor(),
+      "ocarina/duration_events"
+    )
+
+    eventChannel.setStreamHandler(
+      object : EventChannel.StreamHandler {
+        override fun onListen(arguments: Any?, events: EventSink?) {
+          eventSink = events
+        }
+
+        override fun onCancel(arguments: Any?) {
+          eventSink = null
+        }
+      }
+    )
 
     flutterAssets = flutterPluginBinding.flutterAssets;
     context = flutterPluginBinding.applicationContext;
@@ -242,13 +282,17 @@ public class OcarinaPlugin: FlutterPlugin, MethodCallHandler {
     val volume = call.argument<Double>("volume");
     val loop = call.argument<Boolean>("loop");
     val isAsset = call.argument<Boolean>("isAsset");
+    val getDuration = call.argument<Boolean>("getDuration") ?: false
 
     var player: OcarinaPlayer = if (isAsset!!) {
       AssetOcarinaPlayer(url!!, packageName, volume!!, loop!!, context, flutterAssets);
     } else {
       FileOcarinaPlayer(url!!, volume!!, loop!!, context);
     }
-    player.load();
+    if (getDuration) player.load { duration ->
+      println("SLJ forwarding to event sink? ${eventSink != null}")
+      eventSink?.success(listOf(url, duration))
+    } else player.load()
 
     players.put(id, player);
 
@@ -330,5 +374,6 @@ public class OcarinaPlugin: FlutterPlugin, MethodCallHandler {
 
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
     channel.setMethodCallHandler(null)
+    eventChannel.setStreamHandler(null)
   }
 }
